@@ -1,3 +1,4 @@
+#IK Pi
 import numpy as np
 
 # -----------------------------------------------
@@ -8,17 +9,39 @@ L_1 = 25    # Shoulder to elbow
 L_2 = 25    # Elbow to wrist
 L_3 = 5     # Wrist to gripper tip
 
-def compute_ik(x_target, y_target, z_target):
+# In InverseKinematics.py — add angle bounds validation after solving
+
+JOINT_LIMITS = {
+    # (min_deg, max_deg) — set these once you know your physical stops
+    'theta_1': (-170, 170),   # Base: ±170° from zero
+    'theta_2': (-90,  90),    # Shoulder: ±90° from horizontal
+    'theta_3': (-150,  0),    # Elbow: elbow-up only (negative by convention)
+    'theta_4': (-90,  90),    # Wrist compensation
+}
+
+def check_joint_limits(angles_deg):
+    """
+    Raises ValueError if any joint angle exceeds its physical limit.
+    Call this after compute_ik() before sending over I2C.
+    Limits must be calibrated against the physical hard-stops.
+    """
+    names = ['theta_1', 'theta_2', 'theta_3', 'theta_4']
+    for name, angle in zip(names, angles_deg):
+        lo, hi = JOINT_LIMITS[name]
+        if not (lo <= angle <= hi):
+            raise ValueError(
+                f"Joint limit violation: {name} = {angle:.1f}° "
+                f"(allowed [{lo}, {hi}])"
+            )
+
+
+def compute_ik(x_target, y_target, z_target, ux , uy, uz):
     """
     Compute joint angles for a 4R robot arm with horizontal gripper.
     Returns [theta_1, theta_2, theta_3, theta_4] in degrees.
     Raises ValueError if target is out of reach.
     """
-    # Gripper approach vector (horizontal)
-    norm_xy = np.sqrt(x_target**2 + y_target**2)
-    ux = x_target / norm_xy
-    uy = y_target / norm_xy
-    uz = 0
+    
 
     # Wrist center
     x = x_target - L_3 * ux
