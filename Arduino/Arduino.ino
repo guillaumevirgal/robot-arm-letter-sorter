@@ -1,130 +1,126 @@
-// Arduino
-#include <Wire.h>
+// Arduino.ino
 #include <Servo.h>
+//test
+// ── Pin definitions ────────────────────────────────────────────────────────────
+#define BASE_STEP       3
+#define BASE_DIR        2
+#define SHOULDER_STEP   5
+#define SHOULDER_DIR    4
+#define PIN_ELBOW       10
+#define PIN_GRIPPER     9
 
-// Pin definitions — confirm with hardware
-#define PIN_SIGNAL      7   // Pulse to Raspberry Pi
+// Roll-about-link1 servo — attached and locked at 0°; servo PID resists any external torque
+#define PIN_ROLL        11           // PWM pin for roll servo — verify pin with hardware
 
+// ── Stepper parameters ─────────────────────────────────────────────────────────
+#define STEPS_PER_REV   200         // full steps per motor revolution
+#define MICROSTEP       16          // microstepping setting on the driver
 
+// Calibrated from hardware test (sketch_mar28a.ino):
+//   rotateStepper(12) -> ~180° physical base rotation -> motor-deg/physical-deg = 12/180
+//   rotateStepper(25) -> ~90° physical shoulder rotation  -> motor-deg/physical-deg = 25/90
+#define BASE_STEPS_PER_DEG      ((STEPS_PER_REV * MICROSTEP) / 360.0f * (12.0f / 180.0f))
+#define SHOULDER_STEPS_PER_DEG  ((STEPS_PER_REV * MICROSTEP) / 360.0f * (25.0f / 90.0f))
 
-// Stepper drivers: Base (θ1) and Shoulder (θ2)
-#define BASE_STEP       2
-#define BASE_DIR        4
-#define SHOULDER_STEP   3
-#define SHOULDER_DIR    5
+#define STEP_DELAY_US   15000       // microseconds between step pulses; controls speed
 
-// Servo pins: Elbow (θ3), Wrist (θ4), Gripper
-#define PIN_ELBOW       6
-#define PIN_WRIST       9
-#define PIN_GRIPPER     10
+// ── Angle limits (physical degrees) ───────────────────────────────────────────
+#define BASE_MAX_DEG        180.0f  
+#define SHOULDER_MAX_DEG    144.0f  // max = 40 input units ≈ 144°
+#define ELBOW_NEUTRAL_DEG   90      // servo neutral
+#define GRIPPER_CLOSED_DEG  0       // servo closed
+#define GRIPPER_OPEN_DEG    30      // servo fully open
 
-// Stepper parameters — confirm with hardware
-#define STEPS_PER_REV   200     // Full steps per motor revolution
-#define MICROSTEP       16      // Driver microstepping setting (e.g. DRV8825 at 1/16)
-#define STEPS_PER_DEG   ((STEPS_PER_REV * MICROSTEP) / 360.0f)
-#define STEP_DELAY_US   300     // Microseconds between pulses (controls speed)
+// ── Serial configuration ───────────────────────────────────────────────────────
+#define BAUD            9600
+#define MAX_MSG_LEN     64          // maximum length of one CSV line
 
+#define NB_ANGLES       4           // base, shoulder, elbow, gripper
 
-// I2C
-#define ADRESSE_I2C     8
-#define NB_JOINTS       5
-#define NB_BOOL         1
-#define PACKET_SIZE     (NB_BOOL + NB_JOINTS * 4)
-
+Servo servo_roll;                   // roll servo — locked at 0°, never commanded again
 Servo servo_elbow;
-Servo servo_wrist;
 Servo servo_gripper;
 
-volatile float  target_angles[NB_JOINTS];
-volatile bool   letter_sorted    = false; // State: says if the letter has been sorted and if we can go to the next one
-volatile bool   newData = false; // New I2C data flag
+float  target_angles[NB_ANGLES];    // joint angles from the last command
+bool   letter_sorted = false;       // true when the letter has been placed
 
-long base_steps_current     = 0;  // Current base position tracked in steps (needed for direction and delta)
-long shoulder_steps_current = 0;  // Current shoulder position tracked in steps
+long base_steps_current     = 0;    // current base position in steps
+long shoulder_steps_current = 0;    // current shoulder position in steps
 
 
-// ─────────────────────────────────────────────────────────────────
-// Stall-based homing for one stepper axis
-//
-// Strategy: drive slowly toward the hard-stop for up to maxSteps.
-// The motor will stall against the stop. We don't detect the stall
-// electrically — we just drive a safe over-travel distance and rely
-// on the physical stop to absorb it (low speed = low force = safe).
-// After homing, zero the step counter and back off by backoff_deg
-// so the arm is not pressing against the stop during operation.
-//
-// IMPORTANT: dirToStop must be confirmed on hardware.
-//   - HIGH or LOW depending on which direction reaches the stop.
-// ─────────────────────────────────────────────────────────────────
+// ── Homing ────────────────────────────────────────────────────────────────────
+// Drives axis into its hard-stop (3× slower), then backs off by backoff_deg.
+// stepsPerDeg is the joint-specific calibrated conversion.
+void homeAxis(int stepPin, int dirPin, long &currentSteps, int dirToStop,
+              float homeAngle_deg, float backoff_deg, float stepsPerDeg) {
 
-// homeAngle_deg : IK angle (degrees) that the physical hardstop corresponds to.
-//                 The operational zero is NOT the stop — it is wherever the IK defines 0.
-//                 After homing, currentSteps reflects the true IK angle so moveStepper
-//                 can use absolute IK targets directly.
-void homeAxis(int stepPin, int dirPin, long &currentSteps,
-              int dirToStop, float homeAngle_deg, float backoff_deg) {
-
-  // Drive toward the stop at reduced speed (3× slower than normal)
   digitalWrite(dirPin, dirToStop);
-  long maxSteps = (long)(270.0f * STEPS_PER_DEG); // 270° max travel — covers full range
+  long maxSteps = (long)(270.0f * stepsPerDeg); // 270° physical as safe sweep limit
 
   for (long i = 0; i < maxSteps; i++) {
     digitalWrite(stepPin, HIGH);
-    delayMicroseconds(STEP_DELAY_US * 3);  // Slow: less force on stop, less lost steps
+    delayMicroseconds(STEP_DELAY_US * 3);       // 3× slower to reduce impact force
     digitalWrite(stepPin, LOW);
     delayMicroseconds(STEP_DELAY_US * 3);
   }
 
-  // We are now at the hard-stop (IK angle = homeAngle_deg).
-  currentSteps = (long)(homeAngle_deg * STEPS_PER_DEG);
+  currentSteps = (long)(homeAngle_deg * stepsPerDeg);
 
-  // Back off so the arm isn't pressing against the stop during operation.
-  int backoffDir = (dirToStop == HIGH) ? LOW : HIGH;
-  long backoffSteps = (long)(backoff_deg * STEPS_PER_DEG);
+  int  backoffDir   = (dirToStop == HIGH) ? LOW : HIGH;
+  long backoffSteps = (long)(backoff_deg * stepsPerDeg);
 
   digitalWrite(dirPin, backoffDir);
   for (long i = 0; i < backoffSteps; i++) {
     digitalWrite(stepPin, HIGH);
-    delayMicroseconds(STEP_DELAY_US * 2);
+    delayMicroseconds(STEP_DELAY_US * 2);       // 2× slower than normal
     digitalWrite(stepPin, LOW);
     delayMicroseconds(STEP_DELAY_US * 2);
   }
 
-  // Update currentSteps: backoffDir HIGH = positive direction, LOW = negative
-  currentSteps += (backoffDir == HIGH) ? backoffSteps : -backoffSteps;
+  if (backoffDir == HIGH) currentSteps += backoffSteps;
+  else currentSteps -= backoffSteps;
 }
 
 
-// I2C receive
-void receiveData(int nbBytes) {
-  if (nbBytes < PACKET_SIZE) return;
+// ── Serial parser ─────────────────────────────────────────────────────────────
+bool parseSerial() {
+  static char  buf[MAX_MSG_LEN];
+  static int   idx = 0;
 
-  byte buffer[PACKET_SIZE];
-  for (int i = 0; i < PACKET_SIZE; i++) {
-    buffer[i] = Wire.read();
+  while (Serial.available()) {
+    char c = Serial.read();
+
+    if (c == '\n') {
+      buf[idx] = '\0';
+      idx = 0;
+
+      char* token = strtok(buf, ",");         // first token: letter_sorted (0 or 1)
+      if (token == NULL) return false;
+      letter_sorted = atoi(token);
+
+      for (int i = 0; i < NB_ANGLES; i++) {  // next 4 tokens: joint angles
+        token = strtok(NULL, ",");
+        if (token == NULL) return false;
+        target_angles[i] = atof(token);
+      }
+      return true;
+    }
+
+    if (idx < MAX_MSG_LEN - 1) buf[idx++] = c;
   }
-
-  // Extract process state
-  memcpy((void*)&letter_sorted, buffer, 1);
-
-  // Extract joint angles
-  for (int i = 0; i < NB_JOINTS; i++) {
-    memcpy((void*)&target_angles[i], buffer + NB_BOOL + i * 4, 4);
-  }
-  newData = true;
+  return false;
 }
 
-// Move one stepper to a target angle (blocking); check direction of the rotation with hardware
-void moveStepper(int stepPin, int dirPin, long &currentSteps, float targetDeg) {
-  long targetSteps = (long)(targetDeg * STEPS_PER_DEG);
-  long delta = targetSteps - currentSteps;
+
+// ── Stepper move (absolute, physical degrees) ─────────────────────────────────
+void moveStepper(int stepPin, int dirPin, long &currentSteps,
+                 float targetDeg, float stepsPerDeg) {
+  long targetSteps = (long)(targetDeg * stepsPerDeg);
+  long delta       = targetSteps - currentSteps;
+
   if (delta == 0) return;
-  else if(delta > 0){
-      digitalWrite(dirPin, HIGH);
-  }
-  else{
-      digitalWrite(dirPin, LOW);
-  }
+
+  digitalWrite(dirPin, delta > 0 ? HIGH : LOW);
 
   long n = abs(delta);
   for (long i = 0; i < n; i++) {
@@ -137,97 +133,84 @@ void moveStepper(int stepPin, int dirPin, long &currentSteps, float targetDeg) {
 }
 
 
-// Sequential movement to avoid collisions
-// Order: [Base + Wrist] → [Shoulder] → [Elbow] → [Gripper]
+// Apply received angles to all joints 
+// Order: Base → Shoulder → Elbow → Gripper  (avoids collisions)
 void applyAngles() {
-  // Step 1: Base (stepper) + Wrist (servo) simultaneously
-  servo_wrist.write(constrain((int)target_angles[3], 0, 180));// Wrist servo is written first (non-blocking) 
-  moveStepper(BASE_STEP, BASE_DIR, base_steps_current, target_angles[0]); //Then base stepper runs
-  delay(700);  // Wait for wrist to reach position; adjust to worst-case travel angle in hardware
+  float baseDeg     = constrain(target_angles[0], -BASE_MAX_DEG, BASE_MAX_DEG);
+  float shoulderDeg = constrain(target_angles[1], 0.0f, SHOULDER_MAX_DEG);
 
-  // Step 2: Shoulder (stepper)
-  moveStepper(SHOULDER_STEP, SHOULDER_DIR, shoulder_steps_current, target_angles[1]);
-  delay(300);// Wait for shoulder to reach position; adjust to worst-case travel angle in hardware
+  moveStepper(BASE_STEP, BASE_DIR, base_steps_current, baseDeg, BASE_STEPS_PER_DEG);
+  delay(3000);
 
-  // Step 3: Elbow (servo)
+  moveStepper(SHOULDER_STEP, SHOULDER_DIR, shoulder_steps_current, shoulderDeg, SHOULDER_STEPS_PER_DEG);
+  delay(4000);
+
   servo_elbow.write(constrain((int)target_angles[2], 0, 180));
-  delay(1000);  // Wait for elbow to reach position; adjust to worst-case travel angle in hardware
+  delay(500);
 
-  // Step 4: Gripper (servo)
-  servo_gripper.write(constrain((int)target_angles[4], 0, 180));
-  delay(500);// Wait for gripper to reach position; adjust to hardware
-}
-
-void Readysignal() { // Pulse to inform of the state change
-  digitalWrite(PIN_SIGNAL, HIGH);
-  delay(100);
-  digitalWrite(PIN_SIGNAL, LOW);
+  // Gripper: 0° = closed, 30° = open
+  servo_gripper.write(constrain((int)target_angles[3], GRIPPER_CLOSED_DEG, GRIPPER_OPEN_DEG));
+  delay(200);
 }
 
 
 void setup() {
-  Serial.begin(9600);  // Must be first so homing messages are visible
+  Serial.begin(BAUD);
 
-  pinMode(PIN_SIGNAL, OUTPUT);
-  digitalWrite(PIN_SIGNAL, LOW);
-
-  // Stepper pins
-  pinMode(BASE_STEP,OUTPUT);
-  pinMode(BASE_DIR,OUTPUT);
+  pinMode(BASE_STEP,     OUTPUT);
+  pinMode(BASE_DIR,      OUTPUT);
   pinMode(SHOULDER_STEP, OUTPUT);
-  pinMode(SHOULDER_DIR,OUTPUT);
+  pinMode(SHOULDER_DIR,  OUTPUT);
 
-  // Servos
+  // Roll-about-link1: attach servo and lock at 0° — servo PID actively holds the position
+  servo_roll.attach(PIN_ROLL);
+  servo_roll.write(0);              // locked at 0°; never written again
+
   servo_elbow.attach(PIN_ELBOW);
-  servo_wrist.attach(PIN_WRIST);
   servo_gripper.attach(PIN_GRIPPER);
 
-  // Neutral positions — confirm with hardware
-  servo_elbow.write(90);
-  servo_wrist.write(90);
-  servo_gripper.write(90);
+  servo_elbow.write(ELBOW_NEUTRAL_DEG);   // neutral = 90°
+  servo_gripper.write(GRIPPER_CLOSED_DEG);
 
   Serial.println("[HOMING] Starting...");
 
-  // HOME BASE (θ1)
+  // Home base axis (θ1) — confirm dirToStop on hardware
+  /*
   homeAxis(BASE_STEP, BASE_DIR, base_steps_current,
-           HIGH,   // ← confirm: which direction reaches the physical stop?
-           0.0f,   // ← confirm: IK angle (deg) of the base hardstop
-           5.0f);  // back off 5° from the stop
-
+           HIGH,           // direction toward hard stop — confirm with hardware
+           0.0f,           // home = 0° (arm facing tray)
+           5.0f,           // back off 5° from stop
+           BASE_STEPS_PER_DEG);
   Serial.println("[HOMING] Base done.");
-
-  // HOME SHOULDER (θ2): hardstop at 85° IK, approached from the negative direction
+*/
+  // Home shoulder axis (θ2)
   homeAxis(SHOULDER_STEP, SHOULDER_DIR, shoulder_steps_current,
-           LOW,    // negative direction reaches the stop
-           85.0f,  // IK angle of the shoulder hardstop
-           5.0f);  // back off 5° → arm will settle at 90° after homing
+           LOW,            // direction of the camera
+           108.0f,          // IK angle at hard stop (measured)
+           5.0f,           // back off 5° → settles at ~90°
+           SHOULDER_STEPS_PER_DEG);
+  Serial.println("[HOMING] Shoulder done.");
 
-  Serial.println("[HOMING] Shoulder done. System ready.");
+  servo_elbow.write(ELBOW_NEUTRAL_DEG);
+  servo_gripper.write(GRIPPER_OPEN_DEG);
 
-  // Servos to neutral
-  servo_elbow.write(90);
-  servo_wrist.write(90);
-  servo_gripper.write(90);
-
-  Wire.begin(ADRESSE_I2C);
-  Wire.onReceive(receiveData);
+  Serial.println("READY");
 }
 
-void loop() {
-  if (newData) {
-    newData = false;
 
-    Serial.print("Ready for the next letter? "); Serial.println(letter_sorted);
-    Serial.print("Angles → ");
-    const char* labels[] = {"base", "shoulder", "elbow", "wrist", "gripper"};
-    for (int i = 0; i < NB_JOINTS; i++) {
-      Serial.print(labels[i]); Serial.print(": ");
-      Serial.print(target_angles[i]); Serial.print("°  ");
+void loop() {
+  if (parseSerial()) {
+    Serial.print("letter_sorted: "); Serial.println(letter_sorted);
+    const char* labels[] = {"base", "shoulder", "elbow", "gripper"};
+    for (int i = 0; i < NB_ANGLES; i++) {
+      Serial.print(labels[i]);
+      Serial.print(": ");
+      Serial.print(target_angles[i]);
+      Serial.println(" deg");
     }
-    Serial.println();
 
     applyAngles();
-    Readysignal();
+
+    Serial.println("READY");
   }
 }

@@ -1,113 +1,136 @@
-#main Pi
-import smbus2
-import struct
-import time
-import RPi.GPIO as GPIO
-from InverseKinematics import compute_ik, check_joint_limits
-import numpy as np
+# Main.py
+import re
+import difflib
+import serial                               # pyserial: USB serial communication with the Arduino
+import numpy as np                          
+from IK import compute_ik, check_joint_limits  
+from vision import get_vision               
 
-GPIO_PIN = 17  # Confirm with hardware
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(GPIO_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+# Serial configuration 
+PORT = 'COM9'   # Change to match the port
+BAUD = 9600     
+ser = serial.Serial(PORT, BAUD, timeout=60) # timeout=60s; max time to wait for Arduino reply
 
+# Pigeon hole coordinates (x, y, z) in mm (?? change to cm)
+Pigeon1 = (-30, -7.5, 15)
+Pigeon2 = (-30,  7.5, 15)
+Pigeon3 = (-30, -7.5,  7.5)
+Pigeon4 = (-30,  7.5,  7.5)
 
-ADRESSE_ARDUINO = 0x08
-bus = smbus2.SMBus(1)
-
-Pigeon1 = (-30,-7.5,15, -30/np.sqrt(-30**2 + -7.5**2), -7.5/np.sqrt(-30**2 + -7.5**2), 0) #(x,y,z,ux,uy,uz)
-Pigeon2 = (-30, 7.5,15, -30/np.sqrt(-30**2 + 7.5**2), 7.5/np.sqrt(-30**2 + 7.5**2), 0)
-Pigeon3 = (-30,-7.5,7.5, -30/np.sqrt(-30**2 + -7.5**2), -7.5/np.sqrt(-30**2 + -7.5**2), 0)
-Pigeon4 = (-30, 7.5,7.5, -30/np.sqrt(-30**2 + 7.5**2), 7.5/np.sqrt(-30**2 + 7.5**2), 0)
-
-
-# Coordinates for each name (wait for hardware)
-TARGETS = {
-    "George Washington":  Pigeon1, 
-    "Thomas Jefferson":   Pigeon2,
-    "Theodore Roosevelt": Pigeon3,
-    "Abraham Lincoln":    Pigeon4,
+#  Name -> pigeon hole coordinates 
+TARGETS = { 
+    "George Washington":  Pigeon1,  # top-left pigeon hole
+    "Thomas Jefferson":   Pigeon2,  # top-right
+    "Theodore Roosevelt": Pigeon3,  # bottom-left
+    "Abraham Lincoln":    Pigeon4,  # bottom-right
 }
 
-Tray       = (30, 0, 15, 1, 0, 0)  # Tray output, where the letters are taken
-VisionPose = (10, 0, 20, 1, 0, 0)  # In front of link 1, letter held vertically for OCR — confirm with hardware
+Tray       = (30,  0, 10)  # coordinate of the letter when on the tray
+VisionPose = (10,  0, 30)  # letter held in front of camera
 
-# Gripper angles — confirm with hardware
-GRIPPER_OPEN   = 0    # degrees — release letter
-GRIPPER_CLOSED = 60   # degrees — hold letter
-
-STEP_PICKUP = 0
-STEP_VISION = 1
-STEP_SORT   = 2
-step = STEP_PICKUP
-# current_target is no longer needed: vision is read at the start of STEP_SORT,
-# once the arm has reached VisionPose and the Arduino has pulsed back
-
-def I2C(letter_sorted, angles, gripper_angle):  # 1 bool + 5 floats = 21 bytes
-    octets = struct.pack('?5f', letter_sorted, *angles, gripper_angle)
-    bus.write_i2c_block_data(ADRESSE_ARDUINO, 0, list(octets))
+# Gripper servo angles 
+GRIPPER_OPEN   = 30   # releases the letter
+GRIPPER_CLOSED = 0  # grips the letter
 
 
-def IK(x, y, z, ux, uy, uz, letter_sorted, gripper_angle):
+def send_to_arduino(letter_sorted, angles):
+    msg = ( #CSV string
+        f"{int(letter_sorted)},"        # 1 (done, ready for next) or 0 (still in progress)
+        f"{angles[0]:.2f},"             # theta1 — base rotation (degrees)
+        f"{angles[1]:.2f},"             # theta2 — shoulder (degrees)
+        f"{angles[2]:.2f},"             # theta3 — elbow (degrees)
+        f"{angles[3]:.2f}\n"            # gripper angle (degrees)
+    )
+    ser.write(msg.encode())             # encode string to bytes and send over serial
+    print(f"Sent: {msg.strip()}")      
 
-    # Inverse kinematic result
+
+def wait_for_ready(): #wait untill the arduino is finished moving
+    print("Waiting for Arduino...")
+    while True:                                     # loop until Arduino send "ready"
+        line = ser.readline().decode().strip()      # read one line and remove whitespace
+        print(f"Arduino: {line}")                   
+        if line == "READY":                         # Arduino signals it has finished moving
+            return
+
+
+def move(x, y, z, letter_sorted, gripper_state): # Hub for fonctions
     try:
-        angles_joints = compute_ik(x, y, z, ux, uy, uz)  # IK, returns degrees for the 4 joints
-        check_joint_limits(angles_joints)
+        angles_joints = compute_ik(x, y, z)         # returns [theta1, theta2, theta3] in degrees
+        check_joint_limits(angles_joints)           # ValueError if any angle is out of range
     except ValueError as e:
-        print(f"IK/limit Error: {e}")
-        return
+        print(f"IK/limit Error: {e}")              
+        return False                              
 
-    I2C(letter_sorted, angles_joints, gripper_angle)
-    print(f"Ready? ({letter_sorted}) | angles: {angles_joints} | gripper: {gripper_angle}°")
-    return True
-
-
-def get_vision():
-    # Call the Vision script 
-    return "George Washington" #return the name
-
-def get_target(vision): # Returns (x, y, z) coordinates for a given name
-    if vision not in TARGETS:
-        raise ValueError(f"Unknown name : {vision}") # Return an Error, could be changed to put the letter in unlabelled pigeon hole
-    return TARGETS[vision]
-
-def on_pulse(channel):  # Every pulse of the GPIO makes it go to the next step of the process
-    global step
-
-    if step == STEP_PICKUP:
-        print("[STATE] PICKUP")
-        if IK(*Tray, letter_sorted=False, gripper_angle=GRIPPER_CLOSED):
-            step = STEP_VISION
-
-    elif step == STEP_VISION:
-        print("[STATE] VISION")
-        # Only send the arm to VisionPose — do NOT call get_vision() here.
-        # The Arduino pulses back once the arm has reached VisionPose.
-        # OLD (bug): vision was read immediately after IK(), before the arm moved.
-        if IK(*VisionPose, letter_sorted=False, gripper_angle=GRIPPER_CLOSED):
-            step = STEP_SORT
-
-    elif step == STEP_SORT:
-        print("[STATE] SORT")
-        # Arm is now at VisionPose — safe to read the letter
-        vision = get_vision()
-        try:
-            target = get_target(vision)
-        except ValueError as e:
-            print(f"[Vision Error] {e}")
-            return  # Stay in STEP_SORT, retry on next pulse
-        if IK(*target, letter_sorted=True, gripper_angle=GRIPPER_OPEN):
-            step = STEP_PICKUP
+    all_angles = angles_joints + [gripper_state]   
+    send_to_arduino(letter_sorted, all_angles)      
+    wait_for_ready()                               
+    return True                                    
 
 
+def _normalize(s):
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-zA-Z ]', '', s)).strip().upper() # Uppercase, remove non-letter characters, collapse whitespace
 
-GPIO.add_event_detect(GPIO_PIN, GPIO.RISING, callback=on_pulse, bouncetime=300) #The code run every rising edge/pulse on the GPIO
-print("En attente des impulsions Arduino...")
+def get_target(raw_text):
+    detected = _normalize(raw_text)
+
+    for name, coords in TARGETS.items():     #Exact match after normalization 
+        if _normalize(name) == detected:
+            return coords
+
+    
+    for name, coords in TARGETS.items(): # Exact name appears somewhere inside the OCR noise
+        if _normalize(name) in detected:
+            print(f"[Vision] Substring match: '{name}'")
+            return coords
+
+
+    scores = {}
+    for name in TARGETS: # partial match
+        words = _normalize(name).split()
+        tokens = detected.split()
+        matched = sum(1 for w in words if any(t in w or w in t for t in tokens))
+        scores[name] = matched / len(words)
+
+    best_name = max(scores, key=scores.get)
+    if scores[best_name] >= 0.5:                   # 0.5 = at least half the name recognized
+        print(f"[Vision] Partial match: '{best_name}' (score={scores[best_name]:.2f})")
+        return TARGETS[best_name]
+
+    best_name = max(TARGETS, key=lambda n: difflib.SequenceMatcher( #handles number-letter OCR substitutions (0→O, 1→I, 5→S)
+        None, _normalize(n), detected).ratio())
+    score = difflib.SequenceMatcher(None, _normalize(best_name), detected).ratio()
+    if score >= 0.5:
+        print(f"[Vision] Fuzzy match: '{best_name}' (score={score:.2f})")
+        return TARGETS[best_name]
+
+    raise ValueError(f"Unknown name: {raw_text!r}")
+
+
+wait_for_ready()# wait for homing
 
 try:
     while True:
-        time.sleep(0.1)
+
+        # PICKUP
+        print("[STATE] PICKUP")
+        move(*Tray,       letter_sorted=False, gripper_state=GRIPPER_CLOSED)  # go to tray, close gripper
+
+        # VISION 
+        print("[STATE] VISION")
+        move(*VisionPose, letter_sorted=False, gripper_state=GRIPPER_CLOSED)  # move to camera position
+
+        # SORT 
+        print("[STATE] SORT")
+        name = get_vision()                         # capture frame and run OCR
+        print(f"Detected: '{name}'")
+        try:
+            target = get_target(name)               # look up the destination pigeon hole
+        except ValueError as e:
+            print(f"[Vision Error] {e}")             
+            continue                                # unknown name -> retry from PICKUP
+        move(*target, letter_sorted=True, gripper_state=GRIPPER_OPEN)  # go to pigeon hole, open gripper
+
 except KeyboardInterrupt:
-    print("Arrêt")
-    GPIO.cleanup()
-    bus.close()
+    print("Stopped")
+    ser.close()                                     # close the serial port
