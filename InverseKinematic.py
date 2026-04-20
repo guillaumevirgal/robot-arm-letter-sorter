@@ -1,18 +1,16 @@
-#IK Pi
+#Old IK code
 import numpy as np
 
 # -----------------------------------------------
 # Link parameters
 # -----------------------------------------------
-D_1 = 20    # Base height (mm)
-L_1 = 25    # Shoulder to elbow
-L_2 = 25    # Elbow to wrist
-L_3 = 5     # Wrist to gripper tip
+L_0 = 20    # Base height (mm)
+L_1 = 20    # Shoulder to elbow
+L_2 = 31    # Elbow to gripper tip
 
-# In InverseKinematics.py — add angle bounds validation after solving
 
 JOINT_LIMITS = {
-    # (min_deg, max_deg) — set these once you know your physical stops
+    # (min_deg, max_deg) ; hardware set these once you know your physical stops
     'theta_1': (-170, 170),   # Base: ±170° from zero
     'theta_2': (-90,  90),    # Shoulder: ±90° from horizontal
     'theta_3': (-150,  0),    # Elbow: elbow-up only (negative by convention)
@@ -50,7 +48,7 @@ def compute_ik(x_target, y_target, z_target, ux , uy, uz):
 
     # theta_1 (base)
     xp = np.sqrt(x**2 + y**2)
-    zp = z - D_1
+    zp = z - L_0
     theta_1 = np.arctan2(y, x)
 
     # theta_3 (elbow)

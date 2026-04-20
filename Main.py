@@ -12,10 +12,10 @@ BAUD = 9600
 ser = serial.Serial(PORT, BAUD, timeout=60) # timeout=60s; max time to wait for Arduino reply
 
 # Pigeon hole coordinates (x, y, z) in mm (?? change to cm)
-Pigeon1 = (-30, -7.5, 15)
-Pigeon2 = (-30,  7.5, 15)
-Pigeon3 = (-30, -7.5,  7.5)
-Pigeon4 = (-30,  7.5,  7.5)
+Pigeon1 = (-26.5, -7.5, 20)
+Pigeon2 = (-26.5,  7.5, 20)
+Pigeon3 = (-26.5, -7.5,  10)
+Pigeon4 = (-26.5,  7.5,  10)
 
 #  Name -> pigeon hole coordinates 
 TARGETS = { 
@@ -25,12 +25,20 @@ TARGETS = {
     "Abraham Lincoln":    Pigeon4,  # bottom-right
 }
 
-Tray       = (30,  0, 10)  # coordinate of the letter when on the tray
-VisionPose = (10,  0, 30)  # letter held in front of camera
+Tray       = (32.5,  0, 15)  # coordinate of the letter when on the tray
+VisionPose = (27,  0, 16)  # letter held in front of camera
 
-# Gripper servo angles 
-GRIPPER_OPEN   = 30   # releases the letter
-GRIPPER_CLOSED = 0  # grips the letter
+# Gripper servo angles
+GRIPPER_OPEN   = 0    # releases the letter
+GRIPPER_CLOSED = 30   # grips the letter
+
+# Backlash compensation (degrees) — tune these experimentally
+# Positive = add degrees, Negative = subtract degrees
+BACKLASH = {
+    'theta_2': 2,   # shoulder
+    'theta_3': 10,   # elbow
+    'gripper': 0,   # gripper
+}
 
 
 def send_to_arduino(letter_sorted, angles):
@@ -62,7 +70,9 @@ def move(x, y, z, letter_sorted, gripper_state): # Hub for fonctions
         print(f"IK/limit Error: {e}")              
         return False                              
 
-    all_angles = angles_joints + [gripper_state]   
+    angles_joints[1] += BACKLASH['theta_2']
+    angles_joints[2] += BACKLASH['theta_3']
+    all_angles = angles_joints + [gripper_state + BACKLASH['gripper']]
     send_to_arduino(letter_sorted, all_angles)      
     wait_for_ready()                               
     return True                                    

@@ -28,8 +28,8 @@
 #define BASE_MAX_DEG        180.0f  
 #define SHOULDER_MAX_DEG    144.0f  // max = 40 input units ≈ 144°
 #define ELBOW_NEUTRAL_DEG   90      // servo neutral
-#define GRIPPER_CLOSED_DEG  0       // servo closed
-#define GRIPPER_OPEN_DEG    30      // servo fully open
+#define GRIPPER_CLOSED_DEG  30      // servo closed
+#define GRIPPER_OPEN_DEG    0       // servo fully open
 
 // ── Serial configuration ───────────────────────────────────────────────────────
 #define BAUD            9600
@@ -55,7 +55,7 @@ void homeAxis(int stepPin, int dirPin, long &currentSteps, int dirToStop,
               float homeAngle_deg, float backoff_deg, float stepsPerDeg) {
 
   digitalWrite(dirPin, dirToStop);
-  long maxSteps = (long)(270.0f * stepsPerDeg); // 270° physical as safe sweep limit
+  long maxSteps = (long)(200.0f * stepsPerDeg); // 270° physical as safe sweep limit
 
   for (long i = 0; i < maxSteps; i++) {
     digitalWrite(stepPin, HIGH);
@@ -186,13 +186,18 @@ void setup() {
   // Home shoulder axis (θ2)
   homeAxis(SHOULDER_STEP, SHOULDER_DIR, shoulder_steps_current,
            LOW,            // direction of the camera
-           108.0f,          // IK angle at hard stop (measured)
-           5.0f,           // back off 5° → settles at ~90°
+           18.0f,           // IK angle at hard stop (measured)
+           5.0f,           // back off 5° → settles at ~23°
            SHOULDER_STEPS_PER_DEG);
   Serial.println("[HOMING] Shoulder done.");
 
   servo_elbow.write(ELBOW_NEUTRAL_DEG);
   servo_gripper.write(GRIPPER_OPEN_DEG);
+
+  Serial.print("base: ");    Serial.print(base_steps_current / BASE_STEPS_PER_DEG);    Serial.println(" deg");
+  Serial.print("shoulder: "); Serial.print(shoulder_steps_current / SHOULDER_STEPS_PER_DEG); Serial.println(" deg");
+  Serial.print("elbow: ");   Serial.print(ELBOW_NEUTRAL_DEG);  Serial.println(" deg");
+  Serial.print("gripper: "); Serial.print(GRIPPER_OPEN_DEG);   Serial.println(" deg");
 
   Serial.println("READY");
 }

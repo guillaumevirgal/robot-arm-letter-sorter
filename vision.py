@@ -19,14 +19,14 @@ def get_vision():
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     
-    gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC) #Upscale = zoom
+    gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC) #Upscale = zoom
 
     # Slight blur to reduce noise before thresholding
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
 
     thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY
-                                    ,21 #Block size; increase if text is large, decrease if small
-                                    ,5 #Constant subtracted from the mean
+                                    ,19 #Block size; increase if text is large, decrease if small
+                                    ,1 #Constant subtracted from the mean
                                     )
 
     text = pytesseract.image_to_string(thresh, config='--psm 1') #Tesseract mode to handle inclininate text

@@ -1,112 +1,88 @@
 %---------------------------------------
-% Inverse Kinematics for Spatial 4R robot
-% Base + Shoulder + Elbow + Wrist + Gripper
-% Adapted from B5XRO base code (Kong, 2023)
+% Inverse Kinematics for 4-DOF robot arm
+% Base yaw + Shoulder pitch + L1 roll + Elbow pitch
 %---------------------------------------
 
-% Link parameters
-d_1 = 20;   % Base height (mm)
-l_1 = 25;   % Shoulder to elbow
-l_2 = 25;   % Elbow to wrist
-l_3 = 5;    % Wrist to gripper tip (gripper length)
+% Link parameters (mm)
+L_0 = 200;   % Base height
+L_1 = 200;   % Shoulder to elbow
+L_2 = 185;   % Elbow to gripper tip (L2 + gripper, rigid)
 
 %---------------------------------------
-% Target pose : position + gripper orientation
+% Target position
 %---------------------------------------
-x_target = 20;
-y_target = 20;
-z_target = 10;
-
-% Gripper approach vector (vertical = pointing down to grab a flat letter)
-% If gripper points straight down : ux=0, uy=0, uz=-1
-ux = x_target / sqrt(x_target^2 + y_target^2);
-uy = y_target / sqrt(x_target^2 + y_target^2);
-uz = 0;
+x_target = 270; %Tray (325,0,150)
+y_target = 0;   %Vision (270,0,160)
+z_target = 160; %
 
 %---------------------------------------
-% Step 1 : Compute wrist center (subtract gripper offset from target)
+% Step 1 : theta_1 (base yaw)
 %---------------------------------------
-x = x_target - l_3 * ux;
-y = y_target - l_3 * uy;
-z = z_target - l_3 * uz;
+theta_1 = atan2(y_target, x_target);
 
 %---------------------------------------
-% Step 2 : Solve theta_1 (base rotation)
+% Step 2 : Project to radial-vertical plane
 %---------------------------------------
-xp = sqrt(x^2 + y^2);
-zp = z - d_1;
-
-ctheta_1 = x / xp;
-stheta_1 = y / xp;
-theta_1 = atan2(stheta_1, ctheta_1);
+r = sqrt(x_target^2 + y_target^2);
+z = z_target - L_0;
+D = sqrt(r^2 + z^2);
 
 %---------------------------------------
-% Step 3 : Solve theta_3 (elbow)
+% Step 3 : theta_3 (elbow) via law of cosines
 %---------------------------------------
-ctheta_3 = (xp^2 + zp^2 - l_1^2 - l_2^2) / (2 * l_1 * l_2);
-
-% Check reachability
-if ctheta_3 > 1
-    error('Target is out of reach for the robot.');
-end
-if ctheta_3 < -1
-    error('Target is too close for the robot.');
-end
-
-% Elbow up configuration
-stheta_3 = -sqrt(1 - ctheta_3^2);
-% For elbow down : stheta_3 = sqrt(1 - ctheta_3^2);
-theta_3 = atan2(stheta_3, ctheta_3);
+cos_theta_3 = (D^2 - L_1^2 - L_2^2) / (2 * L_1 * L_2);
+sin_theta_3 = -sqrt(1 - cos_theta_3^2);  % elbow up
+theta_3 = atan2(sin_theta_3, cos_theta_3);
 
 %---------------------------------------
-% Step 4 : Solve theta_2 (shoulder)
+% Step 4 : theta_2 (shoulder)
 %---------------------------------------
-sbeta = zp / sqrt(xp^2 + zp^2);
-cbeta = xp / sqrt(xp^2 + zp^2);
-beta  = atan2(sbeta, cbeta);
+cos_beta = r / D;
+sin_beta = z / D;
+beta = atan2(sin_beta, cos_beta);
 
-cpsi = (xp^2 + zp^2 + l_1^2 - l_2^2) / (2 * l_1 * sqrt(xp^2 + zp^2));
-spsi = (l_2 * stheta_3) / sqrt(xp^2 + zp^2);
-psi  = atan2(spsi, cpsi);
+sin_psi = (L_2 * sin_theta_3) / D;
+cos_psi = (L_1^2 + D^2 - L_2^2) / (2 * L_1 * D);
+psi = atan2(sin_psi, cos_psi);
 
 theta_2 = beta - psi;
 
 %---------------------------------------
-% Step 5 : Solve theta_4 (wrist)
-% Compensates shoulder + elbow to keep gripper orientation constant
+% Step 5 : theta_roll (L1 axial roll)
 %---------------------------------------
-theta_4 = -(theta_2 + theta_3) + pi/2;
+theta_roll = 0;  % radial reach
 
 %---------------------------------------
 % Display results
 %---------------------------------------
 fprintf('--- Joint Angles ---\n');
-fprintf('theta_1 (base)     : %.2f deg\n', rad2deg(theta_1));
-fprintf('theta_2 (shoulder) : %.2f deg\n', rad2deg(theta_2));
-fprintf('theta_3 (elbow)    : %.2f deg\n', rad2deg(theta_3));
-fprintf('theta_4 (wrist)    : %.2f deg\n', rad2deg(theta_4));
+fprintf('theta_1 (base yaw)      : %.2f deg\n', rad2deg(theta_1));
+fprintf('theta_2 (shoulder pitch) : %.2f deg\n', rad2deg(theta_2));
+fprintf('theta_roll (L1 roll)     : %.2f deg\n', rad2deg(theta_roll));
+fprintf('theta_3 (elbow pitch)    : %.2f deg\n', rad2deg(theta_3));
 
 %---------------------------------------
-% Forward kinematics : compute joint positions for plot
+% Forward kinematics verification
 %---------------------------------------
-O_1 = [0, 0, 0];
-O_2 = [0, 0, d_1];
+shoulder = [0, 0, L_0];
 
-O_3 = O_2 + l_1 * [cos(theta_2)*cos(theta_1), ...
-                    cos(theta_2)*sin(theta_1), ...
-                    sin(theta_2)];
+elbow = shoulder + L_1 * [cos(theta_2)*cos(theta_1), ...
+                          cos(theta_2)*sin(theta_1), ...
+                          sin(theta_2)];
 
-O_4 = O_3 + l_2 * [cos(theta_2 + theta_3)*cos(theta_1), ...
-                    cos(theta_2 + theta_3)*sin(theta_1), ...
-                    sin(theta_2 + theta_3)];
+tip = elbow + L_2 * [cos(theta_2 + theta_3)*cos(theta_1), ...
+                     cos(theta_2 + theta_3)*sin(theta_1), ...
+                     sin(theta_2 + theta_3)];
 
-% Gripper tip (end effector)
-P = O_4 + l_3 * [ux, uy, uz];
+fprintf('\n--- FK Verification ---\n');
+fprintf('Target : (%.1f, %.1f, %.1f)\n', x_target, y_target, z_target);
+fprintf('FK tip : (%.1f, %.1f, %.1f)\n', tip(1), tip(2), tip(3));
+fprintf('Error  : %.2f mm\n', norm(tip - [x_target, y_target, z_target]));
 
 %---------------------------------------
 % Plot
 %---------------------------------------
-points  = [O_1; O_2; O_3; O_4; P];
+points = [[0,0,0]; shoulder; elbow; tip];
 XX = points(:,1)';
 YY = points(:,2)';
 ZZ = points(:,3)';
@@ -114,17 +90,14 @@ ZZ = points(:,3)';
 figure;
 plot3(XX, YY, ZZ, 'g-o', 'LineWidth', 2, 'MarkerSize', 10);
 hold on;
-
-% Highlight target
 plot3(x_target, y_target, z_target, 'r*', 'MarkerSize', 15);
 
-% Labels
-labels = {'Base', 'Shoulder', 'Elbow', 'Wrist', 'Gripper'};
-for i = 1:5
+labels = {'Base', 'Shoulder', 'Elbow', 'Tip'};
+for i = 1:4
     text(XX(i), YY(i), ZZ(i), ['  ' labels{i}]);
 end
 
 xlabel('X'); ylabel('Y'); zlabel('Z');
-title('4R Robot Arm - Inverse Kinematics');
+title('3-DOF Robot Arm - Inverse Kinematics');
 grid on; axis equal;
 hold off;

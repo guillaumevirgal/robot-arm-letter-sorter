@@ -6,14 +6,14 @@ import numpy as np
 # -----------------------------------------------
 L_0 = 20    # Base height (mm)
 L_1 = 20    # Shoulder to elbow
-L_2 = 31    # Elbow to gripper tip
+L_2 = 18.5    # Elbow to gripper tip
 
 
 JOINT_LIMITS = {
     # (min_deg, max_deg) ; hardware set these once you know your physical stops
     'theta_1': (-180, 180),   # Base: ±180° from zero
-    'theta_2': (0, 256),      # Shoulder: 0° (down) to 103° (just below hard stop at 108°)
-    'theta_3': (-200,  0),    # Elbow: elbow-up only (negative by convention)
+    'theta_2': (18,  162),    # Shoulder: measured from horizontal; hard stop at 18°
+    'theta_3': (0,  90),    # Elbow: angle between link 2 and continuation of link 1; hard stop at 90°
 }
 
 def check_joint_limits(angles_deg):
@@ -59,7 +59,7 @@ def compute_ik(x_target, y_target, z_target):
     stheta_3 = -np.sqrt(1 - ctheta_3**2)  # elbow up
     #stheta_3 = np.sqrt(1 - ctheta_3**2)  # elbow down
 
-    theta_3 = np.arctan2(stheta_3, ctheta_3)
+    theta_3 = -np.arctan2(stheta_3, ctheta_3)
 
     # theta_2 (shoulder)
     cbeta = r/d
