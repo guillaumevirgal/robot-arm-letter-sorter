@@ -25,6 +25,10 @@ The repository contains both software and mechanical design files.
 
 Submitted for *Robotic Mechanical Systems* B51RO at Heriot-Watt University, 2026. Supervised by Xianwen's Kong.
 
+## Building this
+
+Install the libraries needed: pip install -r requirements.txt 
+
 ## License
 
 Software: MIT
